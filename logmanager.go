@@ -17,8 +17,13 @@ var (
 // Option is a function that can be passed to NewLogManager to configure it.
 type Option func(*LogManager) error
 
+type logWatcher struct {
+	logfile *logFile
+	cancel  context.CancelFunc
+}
+
 // LogManager is used to watch one of more log files for changes and consume the data line by line to be passed
-// as a byte slice to a consumer channel
+// as a byte slice to a consumer channel.
 type LogManager struct {
 	closed    bool // closed is a flag that indicates if the LogManager has been closed
 	ctx       context.Context
@@ -27,8 +32,8 @@ type LogManager struct {
 	evwCancelChan chan error // event watcher cancel channel
 	fileWatcher   *fsnotify.Watcher
 
-	lwMutex     *sync.RWMutex       // lwMutex is a mutex for the logsWatched map
-	logsWatched map[string]*logFile // logsWatched is a map of log files being watched
+	lwMutex     *sync.RWMutex          // lwMutex is a mutex for the logsWatched map
+	logsWatched map[string]*logWatcher // logsWatched is a map of log files being watched
 
 	wpMutex      *sync.RWMutex  // wpMutex is a mutex for the watchedPaths map
 	watchedPaths map[string]int // watchedPaths is a map of paths being watched
@@ -53,7 +58,7 @@ func NewLogManager(ctx context.Context, options ...Option) (*LogManager, error) 
 		ctx:          ctx,
 		ctxCancel:    cancel,
 		fileWatcher:  watcher,
-		logsWatched:  make(map[string]*logFile),
+		logsWatched:  make(map[string]*logWatcher),
 		lwMutex:      &sync.RWMutex{},
 		watchedPaths: make(map[string]int),
 		wpMutex:      &sync.RWMutex{},
@@ -93,7 +98,10 @@ func (lm *LogManager) AddLogFile(lp string) (<-chan []byte, <-chan error, error)
 	if _, exists := lm.logsWatched[lfp]; exists {
 		return nil, nil, fmt.Errorf("log file already being watched: %s", lfp)
 	}
-	lm.logsWatched[lfp] = lf
+
+	// Create a context for the log file
+	ctx, cancel := context.WithCancel(lm.ctx)
+	lm.logsWatched[lfp] = &logWatcher{logfile: lf, cancel: cancel}
 
 	lm.wpMutex.Lock()
 	defer lm.wpMutex.Unlock()
@@ -109,7 +117,7 @@ func (lm *LogManager) AddLogFile(lp string) (<-chan []byte, <-chan error, error)
 	}
 
 	// Start processing
-	lf.dataProcessor(lm.ctx, lm.evwCancelChan, lm.removeChan)
+	lf.dataProcessor(ctx, lm.evwCancelChan, lm.removeChan)
 
 	return lf.dataChan, lf.errorChan, nil
 }
@@ -126,10 +134,12 @@ func (lm *LogManager) RemoveLogFile(lp string) error {
 
 	lm.lwMutex.Lock()
 	defer lm.lwMutex.Unlock()
-	if _, exists := lm.logsWatched[lfp]; !exists {
+	lw, exists := lm.logsWatched[lfp]
+	if !exists {
 		return fmt.Errorf("log file (%s) not watched", lfp)
 	}
 	delete(lm.logsWatched, lfp)
+	lw.cancel()
 
 	lm.wpMutex.Lock()
 	defer lm.wpMutex.Unlock()
@@ -177,7 +187,7 @@ func (lm *LogManager) eventWatcher() {
 				}
 
 				lm.lwMutex.RLock()
-				lf, exists := lm.logsWatched[fse.Name]
+				lw, exists := lm.logsWatched[fse.Name]
 				if !exists {
 					lm.lwMutex.RUnlock()
 					continue
@@ -185,7 +195,7 @@ func (lm *LogManager) eventWatcher() {
 
 				if fse.Op.Has(fsnotify.Create) {
 					select {
-					case lf.createdEvent <- time.Now():
+					case lw.logfile.createdEvent <- time.Now():
 					default:
 					}
 				}
@@ -193,13 +203,13 @@ func (lm *LogManager) eventWatcher() {
 				if fse.Op.Has(fsnotify.Write) {
 					// pop off the lastWriteEvent channel
 					select {
-					case <-lf.lastWriteEvent:
+					case <-lw.logfile.lastWriteEvent:
 					default:
 					}
 
 					// Write a new value to the lastWriteEvent channel
 					select {
-					case lf.lastWriteEvent <- time.Now():
+					case lw.logfile.lastWriteEvent <- time.Now():
 					default:
 					}
 				}
