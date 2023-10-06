@@ -9,6 +9,8 @@ jobs:
   versioned-release:
     name: Generate a new release if a version has been updated
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     
     steps:
       - name: Checkout repository
