@@ -11,6 +11,24 @@ import (
 	"time"
 )
 
+type stateEventOp uint8
+
+func (so stateEventOp) String() string {
+	switch so {
+	case stateEventCreated:
+		return "created"
+	case stateEventRemoved:
+		return "removed"
+	default:
+		return "unknown"
+	}
+}
+
+const (
+	stateEventCreated stateEventOp = iota
+	stateEventRemoved
+)
+
 // logFile is a struct that represents a log file to be consumed by the log manager
 type logFile struct {
 	filePath       string
@@ -20,7 +38,7 @@ type logFile struct {
 	dataChan       chan []byte
 	errorChan      chan error
 	lastWriteEvent chan time.Time
-	createdEvent   chan time.Time
+	stateEvents    chan stateEventOp
 }
 
 // newLogFile configures the logFile struct
@@ -37,7 +55,7 @@ func newLogFile(fp string) (*logFile, error) {
 		dataChan:       make(chan []byte, logBufferLen),
 		errorChan:      make(chan error, 1),
 		lastWriteEvent: make(chan time.Time, 1),
-		createdEvent:   make(chan time.Time),
+		stateEvents:    make(chan stateEventOp),
 	}
 
 	return &lf, nil
@@ -60,96 +78,116 @@ func (lf *logFile) dataProcessor(ctx context.Context, ewCancelChan <-chan error,
 		defer close(lf.dataChan)
 		defer close(lf.errorChan)
 		defer close(lf.lastWriteEvent)
-		defer close(lf.createdEvent)
+		defer close(lf.stateEvents)
 
-		// Stat the file to see if it exists and is a file
-		fi, err := os.Stat(lf.filePath)
-		if err != nil {
-			if !os.IsNotExist(err) {
-				stopChan <- lf.filePath
-				lf.errorChan <- fmt.Errorf("unhandlable error encountered with path (%s): %w", lf.filePath, err)
-				return
-			}
-			lf.created = false
-		}
-
-		if fi != nil && fi.IsDir() {
-			stopChan <- lf.filePath
-			lf.errorChan <- fmt.Errorf("provided filepath (%s) is a directory, must be a file", lf.filePath)
-			return
-		}
-
-		// If the file doesn't exist, wait for it to be created
-		if !lf.created {
-			select {
-			case <-ctx.Done():
-				return
-			case <-lf.createdEvent:
-			}
-		}
-
-		// Open the file once created
-		of, err := os.Open(lf.filePath)
-		if err != nil {
-			stopChan <- lf.filePath
-			lf.errorChan <- fmt.Errorf("unable to open file: %w", err)
-			return
-		}
-		defer of.Close()
-
-		// Main file read loop
-		fr := bufio.NewReader(of)
-	readLoop:
+	creationLoop:
 		for {
-			var readErr error
+			// Stat the file to see if it exists and is a file
+			fi, err := os.Stat(lf.filePath)
+			if err != nil {
+				if !os.IsNotExist(err) {
+					stopChan <- lf.filePath
+					lf.errorChan <- fmt.Errorf("unhandlable error encountered with path (%s): %w", lf.filePath, err)
+					return
+				}
+				lf.created = false
+			}
+
+			if fi != nil && fi.IsDir() {
+				stopChan <- lf.filePath
+				lf.errorChan <- fmt.Errorf("provided filepath (%s) is a directory, must be a file", lf.filePath)
+				return
+			}
+
+			// If the file doesn't exist, wait for it to be created
+			if !lf.created {
+				select {
+				case <-ctx.Done():
+					return
+				case so := <-lf.stateEvents:
+					if so == stateEventCreated {
+						lf.created = true
+						break
+					}
+					stopChan <- lf.filePath
+					lf.errorChan <- fmt.Errorf("unexpected state event: %s", so)
+					return
+				}
+			}
+
+			// Open the file once created
+			of, err := os.Open(lf.filePath)
+			if err != nil {
+				stopChan <- lf.filePath
+				lf.errorChan <- fmt.Errorf("unable to open file: %w", err)
+				return
+			}
+			defer of.Close()
+
+			// Main file read loop
+			fr := bufio.NewReader(of)
+		readLoop:
 			for {
-				var bl []byte
-				bl, readErr = fr.ReadBytes('\n') // Read lines, but we'll still collect the bytes without the newline character
+				var readErr error
+				for {
+					var bl []byte
+					bl, readErr = fr.ReadBytes('\n') // Read lines, but we'll still collect the bytes without the newline character
 
-				bl = bytes.Trim(bl, "\n") // Trim the newline character from the end of the line if it exists
+					bl = bytes.Trim(bl, "\n") // Trim the newline character from the end of the line if it exists
 
-				// Skip empty data
-				if len(bl) == 0 {
+					// Skip empty data
+					if len(bl) == 0 {
+						if readErr != nil {
+							break
+						}
+						continue
+					}
+
+					// Send the line to the data channel
+					select {
+					case <-ctx.Done():
+						return
+					case lf.dataChan <- bl:
+					}
+
+					// If there is an error state then break the loop before next read
 					if readErr != nil {
 						break
 					}
-					continue
 				}
 
-				// Send the line to the data channel
-				select {
-				case <-ctx.Done():
-					return
-				case lf.dataChan <- bl:
-				}
-
-				// If there is an error state then break the loop before next read
-				if readErr != nil {
-					break
-				}
-			}
-
-			if readErr == io.EOF {
-				lf.lastRead = time.Now()
-			} else {
-				stopChan <- lf.filePath
-				lf.errorChan <- fmt.Errorf("error reading file: %w", readErr)
-				return
-			}
-
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case we := <-lf.lastWriteEvent:
-					if we.After(lf.lastRead) {
-						continue readLoop
-					}
-					continue
-				case err := <-ewCancelChan:
+				if readErr == io.EOF {
+					lf.lastRead = time.Now()
+				} else {
 					stopChan <- lf.filePath
-					lf.errorChan <- fmt.Errorf("cancellation requested: %w", err)
+					lf.errorChan <- fmt.Errorf("error reading file: %w", readErr)
 					return
+				}
+
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case we := <-lf.lastWriteEvent:
+						if we.After(lf.lastRead) {
+							continue readLoop
+						}
+						continue
+					case err := <-ewCancelChan:
+						stopChan <- lf.filePath
+						lf.errorChan <- fmt.Errorf("cancellation requested: %w", err)
+						return
+					case so := <-lf.stateEvents:
+						if so == stateEventRemoved {
+							lf.errorChan <- fmt.Errorf("file removed, waiting for creation")
+							lf.created = false
+							of.Close()
+							continue creationLoop
+						}
+						stopChan <- lf.filePath
+						lf.errorChan <- fmt.Errorf("unexpected state event: %s", so)
+						return
+					}
 				}
 			}
 		}

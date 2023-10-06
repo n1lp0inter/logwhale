@@ -62,6 +62,24 @@ func (s *LogManagerTestSuite) TestErrorOnAddLogFile() {
 	s.NoError(err)
 }
 
+func (s *LogManagerTestSuite) TestCleanup() {
+	of, err := os.CreateTemp(os.TempDir(), "test_log")
+	defer of.Close()
+	s.NoError(err)
+
+	_, _, err = s.lm.AddLogFile(of.Name())
+	s.NoError(err)
+
+	_, err = of.WriteString("test line\n")
+	s.NoError(err)
+
+	s.NoError(s.lm.Close())
+	s.True(s.lm.closed)
+
+	s.Equal(0, len(s.lm.logsWatched)) // Not strictly necessary but we should clean up the logsWatched map
+	s.Equal(0, len(s.lm.pathsWatched))
+}
+
 func (s *LogManagerTestSuite) TestRunAndClose() {
 	of, err := os.CreateTemp(os.TempDir(), "test_log")
 	defer of.Close()
@@ -73,19 +91,38 @@ func (s *LogManagerTestSuite) TestRunAndClose() {
 	_, err = of.WriteString("test line\n")
 	s.NoError(err)
 
-	time.Sleep(time.Second)
-
+	time.Sleep(100 * time.Millisecond)
 	select {
 	case data := <-dataChan:
-		s.Equal(string(data), "test line")
+		s.Equal("test line", string(data))
 	case err := <-errorChan:
 		s.Fail("unexpected error: %v", err)
 	default:
 		s.Fail("expected data, got none")
 	}
+}
 
-	s.NoError(s.lm.Close())
-	s.True(s.lm.closed)
+func (s *LogManagerTestSuite) TestRemoveLogFile() {
+	of, err := os.CreateTemp(os.TempDir(), "test_log")
+	defer of.Close()
+	s.NoError(err)
+
+	_, errorChan, err := s.lm.AddLogFile(of.Name())
+	s.NoError(err)
+
+	_, err = of.WriteString("test line\n")
+	s.NoError(err)
+
+	err = of.Close()
+	s.NoError(err)
+	err = os.Remove(of.Name())
+	s.NoError(err)
+
+	time.Sleep(1 * time.Second)
+	select {
+	case err := <-errorChan:
+		s.Equal("file removed, waiting for creation", err.Error())
+	}
 }
 
 func TestLogManagerTestSuite(t *testing.T) {

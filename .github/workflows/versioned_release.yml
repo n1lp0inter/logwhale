@@ -1,0 +1,43 @@
+name: "Versioned Release"
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  versioned-release:
+    name: Generate a new release if a version has been updated
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Updated Version File
+        id: updated-version-file
+        uses: tj-actions/changed-files@v39
+        with:
+          files: |
+            internal/version/VERSION
+
+      - name: Generate Release Tag
+        if: steps.updated-version-file.outputs.any_changed == 'true'
+        id: release-tag
+        run: |
+          echo "release_tag=$(scripts/print_version.sh internal/version/VERSION)" >> $GITHUB_OUTPUT
+
+      - name: Prerelease check
+        if: steps.updated-version-file.outputs.any_changed == 'true'
+        id: prerelease-check
+        run: |
+          echo "prerelease_check=$(scripts/prerelease_check.sh internal/version/VERSION)" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        if: steps.updated-version-file.outputs.any_changed == 'true'
+        id: create-release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: "${{ steps.release-tag.outputs.release_tag }}"
+          commit: "${{ github.sha }}"
+          prerelease: steps.prerelease-check.outputs.prerelease_check == 'true'

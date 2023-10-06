@@ -35,8 +35,8 @@ type LogManager struct {
 	lwMutex     *sync.RWMutex          // lwMutex is a mutex for the logsWatched map
 	logsWatched map[string]*logWatcher // logsWatched is a map of log files being watched
 
-	wpMutex      *sync.RWMutex  // wpMutex is a mutex for the watchedPaths map
-	watchedPaths map[string]int // watchedPaths is a map of paths being watched
+	pwMutex      *sync.RWMutex  // pwMutex is a mutex for the pathsWatched map
+	pathsWatched map[string]int // pathsWatched is a map of paths being watched
 
 	removeChan chan string // removeChan is a channel for log files to be removed from the logsWatched map
 }
@@ -60,8 +60,8 @@ func NewLogManager(ctx context.Context, options ...Option) (*LogManager, error) 
 		fileWatcher:  watcher,
 		logsWatched:  make(map[string]*logWatcher),
 		lwMutex:      &sync.RWMutex{},
-		watchedPaths: make(map[string]int),
-		wpMutex:      &sync.RWMutex{},
+		pathsWatched: make(map[string]int),
+		pwMutex:      &sync.RWMutex{},
 
 		evwCancelChan: make(chan error),
 		removeChan:    make(chan string),
@@ -103,17 +103,17 @@ func (lm *LogManager) AddLogFile(lp string) (<-chan []byte, <-chan error, error)
 	ctx, cancel := context.WithCancel(lm.ctx)
 	lm.logsWatched[lfp] = &logWatcher{logfile: lf, cancel: cancel}
 
-	lm.wpMutex.Lock()
-	defer lm.wpMutex.Unlock()
-	if _, exists := lm.watchedPaths[lf.basepath]; exists {
-		lm.watchedPaths[lf.basepath]++
+	lm.pwMutex.Lock()
+	defer lm.pwMutex.Unlock()
+	if _, exists := lm.pathsWatched[lf.basepath]; exists {
+		lm.pathsWatched[lf.basepath]++
 	} else {
 		err := lm.fileWatcher.Add(lf.basepath)
 		if err != nil {
 			delete(lm.logsWatched, lfp) // Remove the log file from the logsWatched map
 			return nil, nil, fmt.Errorf("unable to watch base path: %w", err)
 		}
-		lm.watchedPaths[lf.basepath] = 1
+		lm.pathsWatched[lf.basepath] = 1
 	}
 
 	// Start processing
@@ -141,20 +141,20 @@ func (lm *LogManager) RemoveLogFile(lp string) error {
 	delete(lm.logsWatched, lfp)
 	lw.cancel()
 
-	lm.wpMutex.Lock()
-	defer lm.wpMutex.Unlock()
-	if _, exists := lm.watchedPaths[bp]; !exists {
+	lm.pwMutex.Lock()
+	defer lm.pwMutex.Unlock()
+	if _, exists := lm.pathsWatched[bp]; !exists {
 		return fmt.Errorf("base path (%s) not watched", bp)
 	}
 
-	if lm.watchedPaths[bp] == 1 {
-		delete(lm.watchedPaths, bp)
+	if lm.pathsWatched[bp] == 1 {
+		delete(lm.pathsWatched, bp)
 		err := lm.fileWatcher.Remove(bp)
 		if err != nil {
 			return fmt.Errorf("unable to unwatch base path (%s): %w", bp, err)
 		}
 	} else {
-		lm.watchedPaths[bp]--
+		lm.pathsWatched[bp]--
 	}
 
 	return nil
@@ -195,9 +195,20 @@ func (lm *LogManager) eventWatcher() {
 
 				if fse.Op.Has(fsnotify.Create) {
 					select {
-					case lw.logfile.createdEvent <- time.Now():
+					case lw.logfile.stateEvents <- stateEventCreated:
 					default:
 					}
+					lm.lwMutex.RUnlock()
+					continue
+				}
+
+				if fse.Op.Has(fsnotify.Remove) {
+					select {
+					case lw.logfile.stateEvents <- stateEventRemoved:
+					default:
+					}
+					lm.lwMutex.RUnlock()
+					continue
 				}
 
 				if fse.Op.Has(fsnotify.Write) {
@@ -212,8 +223,9 @@ func (lm *LogManager) eventWatcher() {
 					case lw.logfile.lastWriteEvent <- time.Now():
 					default:
 					}
+					lm.lwMutex.RUnlock()
+					continue
 				}
-				lm.lwMutex.RUnlock()
 			case err := <-lm.fileWatcher.Errors:
 				lm.evwCancelChan <- fmt.Errorf("file watcher error: %w", err)
 				return
@@ -227,9 +239,18 @@ func (lm *LogManager) Close() error {
 	lm.ctxCancel()
 	lm.closed = true
 
+	lm.lwMutex.Lock()
+	defer lm.lwMutex.Unlock()
+	lm.logsWatched = nil
+
+	lm.pwMutex.Lock()
+	defer lm.pwMutex.Unlock()
+	lm.pathsWatched = nil
+
 	if err := lm.fileWatcher.Close(); err != nil {
 		return fmt.Errorf("could not close file watcher: %w", err)
 	}
+
 	return nil
 }
 
