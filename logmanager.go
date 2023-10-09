@@ -83,6 +83,14 @@ func NewLogManager(ctx context.Context, options ...Option) (*LogManager, error) 
 }
 
 // AddLogFile adds a log file to the LogManager and starts its data processor.
+// Two channels are returned, for data and errors respectively and an error if the Add operation fails completely.
+//
+// The data channel will return a byte slice for each delimited line of the log file. The default delimeter is a newline.
+//
+// The error channel will return any errors encountered while processing the log file which can be both critical and non-critical.
+// When a critical error is encountered, the data processor will stop and the log file will be removed from the LogManager.
+// Non-critical errors will be logged and the data processor will continue.
+// Both channels will be closed when all operations have completed or critical errors have been encountered.
 func (lm *LogManager) AddLogFile(lp string) (<-chan []byte, <-chan error, error) {
 	if lm.closed {
 		return nil, nil, NewLogWhaleError(ErrorStateInternal, "log manager closed", nil)
