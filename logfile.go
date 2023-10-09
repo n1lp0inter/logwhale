@@ -42,17 +42,17 @@ type logFile struct {
 }
 
 // newLogFile configures the logFile struct
-func newLogFile(fp string) (*logFile, error) {
+func newLogFile(fp string, bs int) (*logFile, error) {
 	fi, _ := os.Stat(fp)
 	if fi != nil && fi.IsDir() {
-		return nil, fmt.Errorf("provided filepath (%s) is a directory, must be a file", fp)
+		return nil, NewLogWhaleError(ErrorStateFilePath, fmt.Sprintf("filepath (%s) is a directory, must be a file", fp), nil)
 	}
 
 	lf := logFile{
 		filePath:       fp,
 		basepath:       path.Dir(fp),
 		created:        true,
-		dataChan:       make(chan []byte, logBufferLen),
+		dataChan:       make(chan []byte, bs),
 		errorChan:      make(chan error, 1),
 		lastWriteEvent: make(chan time.Time, 1),
 		stateEvents:    make(chan stateEventOp),
@@ -87,7 +87,7 @@ func (lf *logFile) dataProcessor(ctx context.Context, ewCancelChan <-chan error,
 			if err != nil {
 				if !os.IsNotExist(err) {
 					stopChan <- lf.filePath
-					lf.errorChan <- fmt.Errorf("unhandlable error encountered with path (%s): %w", lf.filePath, err)
+					lf.errorChan <- NewLogWhaleError(ErrorStateInternal, fmt.Sprintf("unhandlable error encountered with path (%s)", lf.filePath), err)
 					return
 				}
 				lf.created = false
@@ -95,7 +95,7 @@ func (lf *logFile) dataProcessor(ctx context.Context, ewCancelChan <-chan error,
 
 			if fi != nil && fi.IsDir() {
 				stopChan <- lf.filePath
-				lf.errorChan <- fmt.Errorf("provided filepath (%s) is a directory, must be a file", lf.filePath)
+				lf.errorChan <- NewLogWhaleError(ErrorStateFilePath, fmt.Sprintf("filepath (%s) is a directory, must be a file", lf.filePath), nil)
 				return
 			}
 
@@ -105,13 +105,18 @@ func (lf *logFile) dataProcessor(ctx context.Context, ewCancelChan <-chan error,
 				case <-ctx.Done():
 					return
 				case so := <-lf.stateEvents:
-					if so == stateEventCreated {
+					switch so {
+					case stateEventCreated:
 						lf.created = true
 						break
+					case stateEventRemoved:
+						lf.created = false
+						continue creationLoop
+					default:
+						stopChan <- lf.filePath
+						lf.errorChan <- NewLogWhaleError(ErrorStateInternal, fmt.Sprintf("unexpected state event while waiting for file creation: %s", so), nil)
+						return
 					}
-					stopChan <- lf.filePath
-					lf.errorChan <- fmt.Errorf("unexpected state event: %s", so)
-					return
 				}
 			}
 
@@ -119,7 +124,7 @@ func (lf *logFile) dataProcessor(ctx context.Context, ewCancelChan <-chan error,
 			of, err := os.Open(lf.filePath)
 			if err != nil {
 				stopChan <- lf.filePath
-				lf.errorChan <- fmt.Errorf("unable to open file: %w", err)
+				lf.errorChan <- NewLogWhaleError(ErrorStateFileIO, fmt.Sprintf("unable to open file: %s", lf.filePath), err)
 				return
 			}
 			defer of.Close()
@@ -160,7 +165,7 @@ func (lf *logFile) dataProcessor(ctx context.Context, ewCancelChan <-chan error,
 					lf.lastRead = time.Now()
 				} else {
 					stopChan <- lf.filePath
-					lf.errorChan <- fmt.Errorf("error reading file: %w", readErr)
+					lf.errorChan <- NewLogWhaleError(ErrorStateFileIO, fmt.Sprintf("error reading file: %s", lf.filePath), readErr)
 					return
 				}
 
@@ -175,18 +180,18 @@ func (lf *logFile) dataProcessor(ctx context.Context, ewCancelChan <-chan error,
 						continue
 					case err := <-ewCancelChan:
 						stopChan <- lf.filePath
-						lf.errorChan <- fmt.Errorf("cancellation requested: %w", err)
+						lf.errorChan <- NewLogWhaleError(ErrorStateCancelled, fmt.Sprintf("operation cancelled"), err)
 						return
 					case so := <-lf.stateEvents:
 						if so == stateEventRemoved {
-							lf.errorChan <- fmt.Errorf("file removed, waiting for creation")
+							lf.errorChan <- NewLogWhaleError(ErrorStateFileRemoved, fmt.Sprintf("file removed, waiting for creation: %s", lf.filePath), nil)
 							lf.created = false
 							of.Close()
 							continue creationLoop
 						}
 						stopChan <- lf.filePath
-						lf.errorChan <- fmt.Errorf("unexpected state event: %s", so)
-						return
+						lf.errorChan <- NewLogWhaleError(ErrorStateInternal, fmt.Sprintf("unexpected state event waiting for writing to resume: %s", so), nil)
+						continue
 					}
 				}
 			}
