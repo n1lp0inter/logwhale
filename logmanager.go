@@ -170,6 +170,38 @@ func (lm *LogManager) RemoveLogFile(lp string) error {
 	return nil
 }
 
+// GetLogFile returns the data and error channels for a log file being watched by the LogManager.
+func (lm *LogManager) GetLogFile(fp string) (<-chan []byte, <-chan error, error) {
+	if lm.closed {
+		return nil, nil, NewLogWhaleError(ErrorStateInternal, "log manager closed", nil)
+	}
+
+	// Clean up the file path
+	lfp := path.Clean(fp)
+
+	lm.lwMutex.Lock()
+	defer lm.lwMutex.Unlock()
+	lw, exists := lm.logsWatched[lfp]
+	if !exists {
+		return nil, nil, NewLogWhaleError(ErrorStateFSWatcher, fmt.Sprintf("file path watch does not exist: %s", lfp), nil)
+	}
+
+	return lw.logfile.dataChan, lw.logfile.errorChan, nil
+}
+
+// GetLogFiles returns a slice of log file paths being watched by the LogManager.
+func (lm *LogManager) GetLogFiles() []string {
+	lm.lwMutex.RLock()
+	defer lm.lwMutex.RUnlock()
+
+	logFiles := make([]string, 0, len(lm.logsWatched))
+	for k := range lm.logsWatched {
+		logFiles = append(logFiles, k)
+	}
+
+	return logFiles
+}
+
 func (lm *LogManager) logfileRemover() {
 	go func() {
 		for {
