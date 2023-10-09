@@ -108,18 +108,28 @@ func (s *LogManagerTestSuite) TestRemoveLogFile() {
 	defer of.Close()
 	s.NoError(err)
 
-	_, errorChan, err := s.lm.AddLogFile(of.Name())
+	dataChan, errorChan, err := s.lm.AddLogFile(of.Name())
 	s.NoError(err)
 
 	_, err = of.WriteString("test line\n")
 	s.NoError(err)
+
+	time.Sleep(100 * time.Millisecond)
+	select {
+	case data := <-dataChan:
+		s.Equal("test line", string(data))
+	case err := <-errorChan:
+		s.Fail("unexpected error: %v", err)
+	default:
+		s.Fail("expected data, got none")
+	}
 
 	err = of.Close()
 	s.NoError(err)
 	err = os.Remove(of.Name())
 	s.NoError(err)
 
-	time.Sleep(1 * time.Second)
+	time.Sleep(100 * time.Millisecond)
 	select {
 	case err := <-errorChan:
 		s.Equal(fmt.Sprintf("state: File removed msg: file removed, waiting for creation: %s", of.Name()), err.Error())
