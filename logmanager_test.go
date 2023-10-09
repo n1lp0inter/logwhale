@@ -2,6 +2,7 @@ package logwhale
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -121,7 +122,7 @@ func (s *LogManagerTestSuite) TestRemoveLogFile() {
 	time.Sleep(1 * time.Second)
 	select {
 	case err := <-errorChan:
-		s.Equal("file removed, waiting for creation", err.Error())
+		s.Equal(fmt.Sprintf("state: File removed msg: file removed, waiting for creation: %s", of.Name()), err.Error())
 	}
 }
 

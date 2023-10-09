@@ -10,9 +10,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
-var (
-	logBufferLen = 1024 // default buffer length for the log reader
-)
+var ()
 
 // Option is a function that can be passed to NewLogManager to configure it.
 type Option func(*LogManager) error
@@ -25,6 +23,8 @@ type logWatcher struct {
 // LogManager is used to watch one of more log files for changes and consume the data line by line to be passed
 // as a byte slice to a consumer channel.
 type LogManager struct {
+	bufferSize int // default buffer length for the log reader
+
 	closed    bool // closed is a flag that indicates if the LogManager has been closed
 	ctx       context.Context
 	ctxCancel context.CancelFunc
@@ -45,16 +45,18 @@ type LogManager struct {
 func NewLogManager(ctx context.Context, options ...Option) (*LogManager, error) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		return nil, fmt.Errorf("unable to create file watcher: %w", err)
+		return nil, NewLogWhaleError(ErrorStateInternal, fmt.Sprint("unable to create file watcher"), err)
 	}
 
 	// Context for LogManager cancellation
 	if ctx == nil {
-		return nil, fmt.Errorf("LogManager requires a valid context")
+		return nil, NewLogWhaleError(ErrorStateInternal, fmt.Sprint("LogManager requires a valid context"), nil)
 	}
 	ctx, cancel := context.WithCancel(ctx)
 
 	lm := &LogManager{
+		bufferSize: 1024,
+
 		ctx:          ctx,
 		ctxCancel:    cancel,
 		fileWatcher:  watcher,
@@ -68,7 +70,7 @@ func NewLogManager(ctx context.Context, options ...Option) (*LogManager, error) 
 	}
 
 	if err := lm.withOptions(options...); err != nil {
-		return nil, fmt.Errorf("unable to process options: %w", err)
+		return nil, NewLogWhaleError(ErrorStateInternal, fmt.Sprint("unable to process options"), err)
 	}
 
 	// Start Processing Events
@@ -83,20 +85,20 @@ func NewLogManager(ctx context.Context, options ...Option) (*LogManager, error) 
 // AddLogFile adds a log file to the LogManager and starts its data processor.
 func (lm *LogManager) AddLogFile(lp string) (<-chan []byte, <-chan error, error) {
 	if lm.closed {
-		return nil, nil, fmt.Errorf("log manager closed")
+		return nil, nil, NewLogWhaleError(ErrorStateInternal, "log manager closed", nil)
 	}
 
 	// Clean up the file path
 	lfp := path.Clean(lp)
-	lf, err := newLogFile(lfp)
+	lf, err := newLogFile(lfp, lm.bufferSize)
 	if err != nil {
-		return nil, nil, fmt.Errorf("unable to configure log file: %w", err)
+		return nil, nil, NewLogWhaleError(ErrorStateInternal, "unable to configure log file", err)
 	}
 
 	lm.lwMutex.Lock()
 	defer lm.lwMutex.Unlock()
 	if _, exists := lm.logsWatched[lfp]; exists {
-		return nil, nil, fmt.Errorf("log file already being watched: %s", lfp)
+		return nil, nil, NewLogWhaleError(ErrorStateFSWatcher, fmt.Sprintf("filepath watch already exists: %s", lfp), nil)
 	}
 
 	// Create a context for the log file
@@ -111,7 +113,7 @@ func (lm *LogManager) AddLogFile(lp string) (<-chan []byte, <-chan error, error)
 		err := lm.fileWatcher.Add(lf.basepath)
 		if err != nil {
 			delete(lm.logsWatched, lfp) // Remove the log file from the logsWatched map
-			return nil, nil, fmt.Errorf("unable to watch base path: %w", err)
+			return nil, nil, NewLogWhaleError(ErrorStateFilePath, fmt.Sprintf("unable to watch base path: %s", lf.basepath), err)
 		}
 		lm.pathsWatched[lf.basepath] = 1
 	}
@@ -125,7 +127,7 @@ func (lm *LogManager) AddLogFile(lp string) (<-chan []byte, <-chan error, error)
 // RemoveLogFile removes a log file from the LogManager and stops its data processor.
 func (lm *LogManager) RemoveLogFile(lp string) error {
 	if lm.closed {
-		return fmt.Errorf("log manager closed")
+		return NewLogWhaleError(ErrorStateInternal, "log manager closed", nil)
 	}
 
 	// Clean up the file path
@@ -136,7 +138,7 @@ func (lm *LogManager) RemoveLogFile(lp string) error {
 	defer lm.lwMutex.Unlock()
 	lw, exists := lm.logsWatched[lfp]
 	if !exists {
-		return fmt.Errorf("log file (%s) not watched", lfp)
+		return NewLogWhaleError(ErrorStateFSWatcher, fmt.Sprintf("file path watch does not exist: %s", lfp), nil)
 	}
 	delete(lm.logsWatched, lfp)
 	lw.cancel()
@@ -144,14 +146,14 @@ func (lm *LogManager) RemoveLogFile(lp string) error {
 	lm.pwMutex.Lock()
 	defer lm.pwMutex.Unlock()
 	if _, exists := lm.pathsWatched[bp]; !exists {
-		return fmt.Errorf("base path (%s) not watched", bp)
+		return NewLogWhaleError(ErrorStateFSWatcher, fmt.Sprintf("base path not watched: %s", bp), nil)
 	}
 
 	if lm.pathsWatched[bp] == 1 {
 		delete(lm.pathsWatched, bp)
 		err := lm.fileWatcher.Remove(bp)
 		if err != nil {
-			return fmt.Errorf("unable to unwatch base path (%s): %w", bp, err)
+			return NewLogWhaleError(ErrorStateInternal, fmt.Sprintf("unable to unwatch base path: %s", bp), err)
 		}
 	} else {
 		lm.pathsWatched[bp]--
@@ -227,7 +229,7 @@ func (lm *LogManager) eventWatcher() {
 					continue
 				}
 			case err := <-lm.fileWatcher.Errors:
-				lm.evwCancelChan <- fmt.Errorf("file watcher error: %w", err)
+				lm.evwCancelChan <- err
 				return
 			}
 		}
@@ -251,16 +253,5 @@ func (lm *LogManager) Close() error {
 		return fmt.Errorf("could not close file watcher: %w", err)
 	}
 
-	return nil
-}
-
-// WithOptions applies the given options to the LogManager
-func (lm *LogManager) withOptions(opts ...Option) error {
-	for _, opt := range opts {
-		err := opt(lm)
-		if err != nil {
-			return fmt.Errorf("cannot apply Option: %w", err)
-		}
-	}
 	return nil
 }
