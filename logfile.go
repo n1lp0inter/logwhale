@@ -105,13 +105,18 @@ func (lf *logFile) dataProcessor(ctx context.Context, ewCancelChan <-chan error,
 				case <-ctx.Done():
 					return
 				case so := <-lf.stateEvents:
-					if so == stateEventCreated {
+					switch so {
+					case stateEventCreated:
 						lf.created = true
 						break
+					case stateEventRemoved:
+						lf.created = false
+						continue creationLoop
+					default:
+						stopChan <- lf.filePath
+						lf.errorChan <- NewLogWhaleError(ErrorStateInternal, fmt.Sprintf("unexpected state event while waiting for file creation: %s", so), nil)
+						return
 					}
-					stopChan <- lf.filePath
-					lf.errorChan <- NewLogWhaleError(ErrorStateInternal, fmt.Sprintf("unexpected state event while waiting for file creation: %s", so), nil)
-					return
 				}
 			}
 
