@@ -11,16 +11,16 @@ increment_version() {
         major=$((major+1))
         minor=0
         patch=0
-        prerelease=""
+        prerelease=$prerelease
         ;;
     -m|--minor)
         minor=$((minor+1))
         patch=0
-        prerelease=""
+        prerelease=$prerelease
         ;;
     -p|--patch)
         patch=$((patch+1))
-        prerelease=""
+        prerelease=$prerelease
         ;;
     -r|--prerelease)
         prerelease="prerelease"

@@ -1,4 +1,4 @@
-module github.com/mcphailtom/logwhale
+module github.com/n1lp0inter/logwhale
 
 go 1.21.1
 
