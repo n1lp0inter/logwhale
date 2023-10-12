@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+// stateEventOp is a type that represents a state event operation.
+// Used to communicate state events to the data processor.
 type stateEventOp uint8
 
 func (so stateEventOp) String() string {
@@ -95,12 +97,13 @@ func (lf *logFile) dataProcessor(ctx context.Context, ewCancelChan <-chan error,
 
 			if fi != nil && fi.IsDir() {
 				stopChan <- lf.filePath
-				lf.errorChan <- NewLogWhaleError(ErrorStateFilePath, fmt.Sprintf("filepath (%s) is a directory, must be a file", lf.filePath), nil)
+				lf.errorChan <- NewLogWhaleError(ErrorStateFilePath, fmt.Sprintf("filepath (%s) is a directory and must be a file", lf.filePath), nil)
 				return
 			}
 
 			// If the file doesn't exist, wait for it to be created
 			if !lf.created {
+				lf.errorChan <- NewLogWhaleError(ErrorStateFileNotExist, fmt.Sprintf("file does not exist: %s", lf.filePath), nil)
 				select {
 				case <-ctx.Done():
 					return
@@ -184,7 +187,7 @@ func (lf *logFile) dataProcessor(ctx context.Context, ewCancelChan <-chan error,
 						return
 					case so := <-lf.stateEvents:
 						if so == stateEventRemoved {
-							lf.errorChan <- NewLogWhaleError(ErrorStateFileRemoved, fmt.Sprintf("file removed, waiting for creation: %s", lf.filePath), nil)
+							lf.errorChan <- NewLogWhaleError(ErrorStateFileRemoved, fmt.Sprintf("file removed: %s", lf.filePath), nil)
 							lf.created = false
 							of.Close()
 							continue creationLoop

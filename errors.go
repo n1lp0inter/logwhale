@@ -15,6 +15,8 @@ func (es ErrorState) String() string {
 		return "Unknown"
 	case ErrorStateEndOfStream:
 		return "End of stream"
+	case ErrorStateFileNotExist:
+		return "File does not exist"
 	case ErrorStateFileRemoved:
 		return "File removed"
 	case ErrorStateCancelled:
@@ -37,6 +39,7 @@ const (
 	ErrorStateCancelled
 	ErrorStateFSWatcher
 	ErrorStateFilePath
+	ErrorStateFileNotExist
 	ErrorStateFileRemoved
 	ErrorStateFileIO
 	ErrorStateEndOfStream

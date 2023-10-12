@@ -132,7 +132,24 @@ func (s *LogManagerTestSuite) TestRemoveLogFile() {
 	time.Sleep(100 * time.Millisecond)
 	select {
 	case err := <-errorChan:
-		s.Equal(fmt.Sprintf("state: File removed msg: file removed, waiting for creation: %s", of.Name()), err.Error())
+		s.Equal(fmt.Sprintf("state: File removed msg: file removed: %s", of.Name()), err.Error())
+	default:
+		s.Fail("expected error, got none")
+	}
+}
+
+func (s *LogManagerTestSuite) TestFileNotExist() {
+	fp := os.TempDir() + "doesnotexist"
+
+	_, errorChan, err := s.lm.AddLogFile(fp)
+	s.NoError(err)
+
+	time.Sleep(100 * time.Millisecond)
+	select {
+	case err := <-errorChan:
+		s.Equal(fmt.Sprintf("state: File does not exist msg: file does not exist: %s", fp), err.Error())
+	default:
+		s.Fail("expected error, got none")
 	}
 }
 
