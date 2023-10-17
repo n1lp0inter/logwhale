@@ -89,7 +89,7 @@ func (lf *logFile) dataProcessor(ctx context.Context, ewCancelChan <-chan struct
 			if err != nil {
 				if !os.IsNotExist(err) {
 					stopChan <- lf.filePath
-					lf.errorChan <- NewLogWhaleError(ErrorStateInternal, fmt.Sprintf("unhandlable error encountered with path (%s)", lf.filePath), err)
+					sendError(NewLogWhaleError(ErrorStateInternal, fmt.Sprintf("unhandlable error encountered with path (%s)", lf.filePath), err), lf.errorChan)
 					return
 				}
 				lf.created = false
@@ -97,15 +97,16 @@ func (lf *logFile) dataProcessor(ctx context.Context, ewCancelChan <-chan struct
 
 			if fi != nil && fi.IsDir() {
 				stopChan <- lf.filePath
-				lf.errorChan <- NewLogWhaleError(ErrorStateFilePath, fmt.Sprintf("filepath (%s) is a directory and must be a file", lf.filePath), nil)
+				sendError(NewLogWhaleError(ErrorStateFilePath, fmt.Sprintf("filepath (%s) is a directory and must be a file", lf.filePath), nil), lf.errorChan)
 				return
 			}
 
 			// If the file doesn't exist, wait for it to be created
 			if !lf.created {
-				lf.errorChan <- NewLogWhaleError(ErrorStateFileNotExist, fmt.Sprintf("file does not exist: %s", lf.filePath), nil)
+				sendError(NewLogWhaleError(ErrorStateFileNotExist, fmt.Sprintf("file does not exist: %s", lf.filePath), nil), lf.errorChan)
 				select {
 				case <-ctx.Done():
+					sendError(NewLogWhaleError(ErrorStateCancelled, fmt.Sprintf("operation cancelled"), ctx.Err()), lf.errorChan)
 					return
 				case so := <-lf.stateEvents:
 					switch so {
@@ -117,7 +118,7 @@ func (lf *logFile) dataProcessor(ctx context.Context, ewCancelChan <-chan struct
 						continue creationLoop
 					default:
 						stopChan <- lf.filePath
-						lf.errorChan <- NewLogWhaleError(ErrorStateInternal, fmt.Sprintf("unexpected state event while waiting for file creation: %s", so), nil)
+						sendError(NewLogWhaleError(ErrorStateInternal, fmt.Sprintf("unexpected state event while waiting for file creation: %s", so), nil), lf.errorChan)
 						return
 					}
 				}
@@ -127,7 +128,7 @@ func (lf *logFile) dataProcessor(ctx context.Context, ewCancelChan <-chan struct
 			of, err := os.Open(lf.filePath)
 			if err != nil {
 				stopChan <- lf.filePath
-				lf.errorChan <- NewLogWhaleError(ErrorStateFileIO, fmt.Sprintf("unable to open file: %s", lf.filePath), err)
+				sendError(NewLogWhaleError(ErrorStateFileIO, fmt.Sprintf("unable to open file: %s", lf.filePath), err), lf.errorChan)
 				return
 			}
 			defer of.Close()
@@ -154,6 +155,7 @@ func (lf *logFile) dataProcessor(ctx context.Context, ewCancelChan <-chan struct
 					// Send the line to the data channel
 					select {
 					case <-ctx.Done():
+						sendError(NewLogWhaleError(ErrorStateCancelled, fmt.Sprintf("operation cancelled"), ctx.Err()), lf.errorChan)
 						return
 					case lf.dataChan <- bl:
 					}
@@ -168,13 +170,14 @@ func (lf *logFile) dataProcessor(ctx context.Context, ewCancelChan <-chan struct
 					lf.lastRead = time.Now()
 				} else {
 					stopChan <- lf.filePath
-					lf.errorChan <- NewLogWhaleError(ErrorStateFileIO, fmt.Sprintf("error reading file: %s", lf.filePath), readErr)
+					sendError(NewLogWhaleError(ErrorStateFileIO, fmt.Sprintf("error reading file: %s", lf.filePath), readErr), lf.errorChan)
 					return
 				}
 
 				for {
 					select {
 					case <-ctx.Done():
+						sendError(NewLogWhaleError(ErrorStateCancelled, fmt.Sprintf("operation cancelled"), ctx.Err()), lf.errorChan)
 						return
 					case we := <-lf.lastWriteEvent:
 						if we.After(lf.lastRead) {
@@ -183,21 +186,32 @@ func (lf *logFile) dataProcessor(ctx context.Context, ewCancelChan <-chan struct
 						continue
 					case <-ewCancelChan:
 						stopChan <- lf.filePath
-						lf.errorChan <- NewLogWhaleError(ErrorStateCancelled, fmt.Sprintf("operation cancelled"), err)
+						sendError(NewLogWhaleError(ErrorStateCancelled, fmt.Sprintf("operation cancelled"), err), lf.errorChan)
 						return
 					case so := <-lf.stateEvents:
 						if so == stateEventRemoved {
-							lf.errorChan <- NewLogWhaleError(ErrorStateFileRemoved, fmt.Sprintf("file removed: %s", lf.filePath), nil)
+							sendError(NewLogWhaleError(ErrorStateFileRemoved, fmt.Sprintf("file removed: %s", lf.filePath), nil), lf.errorChan)
 							lf.created = false
 							of.Close()
 							continue creationLoop
 						}
 						stopChan <- lf.filePath
-						lf.errorChan <- NewLogWhaleError(ErrorStateInternal, fmt.Sprintf("unexpected state event waiting for writing to resume: %s", so), nil)
+						sendError(NewLogWhaleError(ErrorStateInternal, fmt.Sprintf("unexpected state event waiting for writing to resume: %s", so), nil), lf.errorChan)
 						continue
 					}
 				}
 			}
 		}
 	}()
+}
+
+// sendError is a helper function that attempts to send an error to the error channel.
+func sendError(err error, errChan chan<- error) bool {
+	success := false
+	select {
+	case errChan <- err:
+		success = true
+	default:
+	}
+	return success
 }
