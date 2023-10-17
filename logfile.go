@@ -75,7 +75,7 @@ func newLogFile(fp string, bs int) (*logFile, error) {
 // If the file does not exist at startup, the data processor will wait for the file to be created before continuing.
 //
 // The data processor expects the log data to be newline delimited
-func (lf *logFile) dataProcessor(ctx context.Context, ewCancelChan <-chan error, stopChan chan<- string) {
+func (lf *logFile) dataProcessor(ctx context.Context, ewCancelChan <-chan struct{}, stopChan chan<- string) {
 	go func() {
 		defer close(lf.dataChan)
 		defer close(lf.errorChan)
@@ -181,7 +181,7 @@ func (lf *logFile) dataProcessor(ctx context.Context, ewCancelChan <-chan error,
 							continue readLoop
 						}
 						continue
-					case err := <-ewCancelChan:
+					case <-ewCancelChan:
 						stopChan <- lf.filePath
 						lf.errorChan <- NewLogWhaleError(ErrorStateCancelled, fmt.Sprintf("operation cancelled"), err)
 						return

@@ -29,7 +29,7 @@ type LogManager struct {
 	ctx       context.Context
 	ctxCancel context.CancelFunc
 
-	evwCancelChan chan error // event watcher cancel channel
+	evwCancelChan chan struct{} // event watcher cancel channel
 	fileWatcher   *fsnotify.Watcher
 
 	lwMutex     *sync.RWMutex          // lwMutex is a mutex for the logsWatched map
@@ -65,7 +65,7 @@ func NewLogManager(ctx context.Context, options ...Option) (*LogManager, error) 
 		pathsWatched: make(map[string]int),
 		pwMutex:      &sync.RWMutex{},
 
-		evwCancelChan: make(chan error),
+		evwCancelChan: make(chan struct{}),
 		removeChan:    make(chan string),
 	}
 
@@ -224,7 +224,7 @@ func (lm *LogManager) eventWatcher() {
 				return
 			case fse, ok := <-lm.fileWatcher.Events:
 				if !ok {
-					lm.evwCancelChan <- fmt.Errorf("file watcher closed unexpectedly")
+					close(lm.evwCancelChan)
 					return
 				}
 
@@ -268,8 +268,8 @@ func (lm *LogManager) eventWatcher() {
 					lm.lwMutex.RUnlock()
 					continue
 				}
-			case err := <-lm.fileWatcher.Errors:
-				lm.evwCancelChan <- err
+			case <-lm.fileWatcher.Errors:
+				close(lm.evwCancelChan)
 				return
 			}
 		}
